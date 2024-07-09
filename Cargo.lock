@@ -379,4 +379,5 @@ version = "0.1.0"
 dependencies = [
  "autotools",
  "bindgen",
+ "log",
 ]

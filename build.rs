@@ -6,6 +6,8 @@ use std::path::PathBuf;
 use std::process::Command;
 
 fn main() -> std::io::Result<()> {
+    println!("cargo:rerun-if-changed=build.rs");
+
     let out_dir = PathBuf::from(env::var("OUT_DIR").unwrap());
 
     // build wolfSSL
@@ -15,7 +17,7 @@ fn main() -> std::io::Result<()> {
     Command::new("cp")
         .arg("-r")
         .arg("wolfssl-src")
-        .arg(out_dir.clone())
+        .arg(wolfssl_src.clone())
         .output()
         .expect("Unable to copy wolfssl");
     
@@ -41,7 +43,7 @@ fn main() -> std::io::Result<()> {
     Command::new("cp")
         .arg("-r")
         .arg("wolftpm-src")
-        .arg(out_dir)
+        .arg(wolftpm_src.clone())
         .output()
         .expect("Unable to copy wolftpm");
 
@@ -49,11 +51,13 @@ fn main() -> std::io::Result<()> {
 
     conf.reconf("-ivf")
         .disable("examples", None)
-        // .enable("devtpm", None)
+        .disable("firmware", None)
         .enable("advio", None)
         .enable("mmio", None)
         .disable_shared()
         .enable_static()
+        .cflag("-DNO_THREAD_LS")
+        .cflag("-fno-stack-protector")
         .cflag("-fPIC");
     
     let wolftpm_dst = conf.build();
@@ -64,14 +68,10 @@ fn main() -> std::io::Result<()> {
     // Write bindings
 
     let builder = bindgen::Builder::default()
-        // .allowlist_file(wolfssl_dst.join(PathBuf::from("include/wolfssl/.*.h")).to_str().unwrap())
-        // .allowlist_file(wolfssl_dst.join(PathBuf::from("include/wolfssl/wolfcrypt/.*.h")).to_str().unwrap())
-        // .allowlist_file(wolfssl_dst.join(PathBuf::from("include/wolfssl/openssl/compat_types.h")).to_str().unwrap())
         .allowlist_file(wolftpm_dst.join(PathBuf::from("include/wolftpm/tpm2_wrap.h")).to_str().unwrap())
         .clang_arg(format!("-I{}/", wolftpm_dst.join("include").display()))
-        // .clang_arg(format!("-I{}/", wolfssl_dst.join("include").display()))
         .header("wrapper.h")
-        // .derive_debug(true)
+        .use_core()
         .derive_default(true);
 
     let bindings = builder

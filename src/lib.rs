@@ -2,9 +2,9 @@
 #![allow(non_camel_case_types)]
 #![allow(non_snake_case)]
 
-use std::ptr;
+#![no_std]
 
-extern crate log;
+use core::ptr;
 
 include!{"./bindings.rs"}
 
@@ -51,10 +51,10 @@ impl WOLFTPM2_DEV {
     }
 }
 
-fn self_test() {
+pub fn self_test() {
     log::warn!("Hello, world!");
 
-    let dev = &mut WOLFTPM2_DEV::new();
+    let dev = &mut WOLFTPM2_DEV::default();
     let ioCb = None;
     let userCtx = ptr::null_mut();
 

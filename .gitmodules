@@ -1,6 +1,6 @@
 [submodule "wolftpm-src"]
 	path = wolftpm-src
-	url = https://github.com/wolfSSL/wolfTPM
+	url = git@github.com:efjepsen/wolfTPM.git
 [submodule "wolfssl-src"]
 	path = wolfssl-src
 	url = https://github.com/wolfSSL/wolfssl

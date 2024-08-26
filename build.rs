@@ -10,32 +10,6 @@ fn main() -> std::io::Result<()> {
 
     let out_dir = PathBuf::from(env::var("OUT_DIR").unwrap());
 
-    // build wolfSSL
-
-    let wolfssl_src = out_dir.join(PathBuf::from("wolfssl"));
-
-    Command::new("cp")
-        .arg("-r")
-        .arg("wolfssl-src")
-        .arg(wolfssl_src.clone())
-        .output()
-        .expect("Unable to copy wolfssl");
-    
-    let mut conf = Config::new(wolfssl_src);
-
-    conf.reconf("-ivf")
-        .disable("examples", None)
-        .disable("filesystem", None)
-        .enable("singlethreaded", None)
-        .disable_shared()
-        .enable_static()
-        .cflag("-fPIC");
-    
-    let wolfssl_dst = conf.build();
-
-    println!("cargo:rustc-link-search=native={}", wolfssl_dst.display());
-    println!("cargo:rustc-link-lib=static=wolfssl");
-
     // build wolfTPM
 
     let wolftpm_src = out_dir.join(PathBuf::from("wolftpm"));
@@ -54,11 +28,11 @@ fn main() -> std::io::Result<()> {
         .disable("firmware", None)
         .enable("advio", None)
         .enable("mmio", None)
+        .disable("wolfcrypt", None)
         .disable_shared()
         .enable_static()
-        .cflag("-DNO_THREAD_LS")
         .cflag("-fno-stack-protector")
-        .cflag("-fPIC");
+        .cflag("-U_FORTIFY_SOURCE");
     
     let wolftpm_dst = conf.build();
 

@@ -78,7 +78,20 @@ pub fn self_test() -> usize {
     }
 }
 
-pub fn get_signing_key() {
+pub fn get_signing_key(public_key: &mut [u8]) {
+    unsafe {
+        let Some(ref mut signing_key) = SIGNING_KEY else {
+            log::info!("signing_key not created");
+            return;
+        };
+
+        let n = signing_key.pub_.publicArea.unique.rsa.size as usize;
+
+        public_key.copy_from_slice(&signing_key.pub_.publicArea.unique.rsa.buffer[..n]);
+    }
+}
+
+pub fn print_signing_key() {
     // TODO will this actually throw an error if SIGNING_KEY is None?
     unsafe {
         let Some(ref mut signing_key) = SIGNING_KEY else {
@@ -89,6 +102,55 @@ pub fn get_signing_key() {
         log::info!("signing_key.rsa.size: {:?}", signing_key.pub_.publicArea.unique.rsa.size);
         log::info!("signing_key.rsa.exponent: {:?}", signing_key.pub_.publicArea.parameters.rsaDetail.exponent);
         log::info!("signing_key.rsa.buff: {:?}", signing_key.pub_.publicArea.unique.rsa.buffer);
+    }
+}
+
+pub fn sign(digest: &[u8], sig: &mut [u8]) -> i32 {
+    // TODO assert digest is 32 bytes, sig is 256 bytes
+    let sigSz: &mut i32 = &mut (sig.len() as i32);
+    let digestSz: &mut i32 = &mut (digest.len() as i32);
+
+    unsafe {
+        let Some(ref mut dev) = DEV else {
+            log::info!("TPM2 device not initialized");
+            return i32::MAX;
+        };
+
+        let Some(ref mut signing_key) = SIGNING_KEY else {
+            log::info!("signing_key not created");
+            return i32::MAX;
+        };
+
+        let ret = wolfTPM2_SignHashScheme(dev, signing_key, digest.as_ptr(), *digestSz, sig.as_mut_ptr(), sigSz as *mut i32, 0x0014, 0x000B);
+        log::info!("wolfTPM2_SignHashScheme: {:?}", ret);
+
+        return *sigSz;
+    }
+}
+
+pub fn hash_and_sign(data: &[u8], sig: &mut [u8]) -> i32 {
+    let hash = &mut WOLFTPM2_HASH::default();
+    let digest: &mut [byte] = &mut [0; 32];
+    let digestSz: &mut u32 = &mut 32;
+
+    unsafe {
+        let Some(ref mut dev) = DEV else {
+            log::info!("TPM2 device not initialized");
+            return i32::MAX;
+        };
+
+        let ret = wolfTPM2_HashStart(dev, hash, 0x000B, ptr::null_mut(), 0);
+        log::info!("wolfTPM2_HashStart: {:?}", ret);
+
+        let ret = wolfTPM2_HashUpdate(dev, hash, data.as_ptr(), data.len().try_into().unwrap());
+        log::info!("wolfTPM2_HashUpdate: {:?}", ret);
+
+        let ret = wolfTPM2_HashFinish(dev, hash, digest.as_mut_ptr(), digestSz);
+        log::info!("wolfTPM2_HashFinish: {:?}", ret);
+
+        log::info!("Hash: {:?}", digest);
+
+        return sign(digest, sig);
     }
 }
 

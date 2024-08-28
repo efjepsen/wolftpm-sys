@@ -78,16 +78,18 @@ pub fn self_test() -> usize {
     }
 }
 
-pub fn get_signing_key(public_key: &mut [u8]) {
+pub fn get_signing_key(public_key: &mut [u8]) -> usize {
     unsafe {
         let Some(ref mut signing_key) = SIGNING_KEY else {
             log::info!("signing_key not created");
-            return;
+            return usize::MAX;
         };
 
         let n = signing_key.pub_.publicArea.unique.rsa.size as usize;
 
         public_key.copy_from_slice(&signing_key.pub_.publicArea.unique.rsa.buffer[..n]);
+
+        return n;
     }
 }
 

@@ -6,6 +6,8 @@
 #![no_std]
 
 use core::ptr;
+use core::arch::x86_64::_rdtsc;
+use core::arch::asm;
 
 include!{"./bindings.rs"}
 
@@ -127,6 +129,31 @@ pub fn sign(digest: &[u8], sig: &mut [u8]) -> i32 {
         log::info!("wolfTPM2_SignHashScheme: {:?}", ret);
 
         return *sigSz;
+    }
+}
+
+pub fn sign_e2e_benchmark(digest: &[u8], sig: &mut [u8]) -> u64 {
+    // TODO assert digest is 32 bytes, sig is 256 bytes
+    let sigSz: &mut i32 = &mut (sig.len() as i32);
+    let digestSz: &mut i32 = &mut (digest.len() as i32);
+
+    unsafe {
+        let Some(ref mut dev) = DEV else {
+            log::info!("TPM2 device not initialized");
+            return u64::MAX;
+        };
+
+        let Some(ref mut signing_key) = SIGNING_KEY else {
+            log::info!("signing_key not created");
+            return u64::MAX;
+        };
+
+        asm! ("mfence;");
+        let start = unsafe { _rdtsc() };
+        let ret = wolfTPM2_SignHashScheme(dev, signing_key, digest.as_ptr(), *digestSz, sig.as_mut_ptr(), sigSz as *mut i32, 0x0014, 0x000B);
+        let end = unsafe { _rdtsc() };
+        asm! ("mfence;");
+        return end - start;
     }
 }
 

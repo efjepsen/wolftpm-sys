@@ -17,6 +17,12 @@ static mut SIGNING_KEY: Option<WOLFTPM2_KEY> = None;
 const nullHandle: u32 = 0x40000007;
 const ownerHandle: u32 = 0x40000001;
 
+const TPM_ECC_NIST_P256: u16 = 0x0003;
+const TPM_ALG_SHA256: u16 = 0x000B;
+const TPM_ALG_RSASSA: u16 = 0x0014;
+const TPM_ALG_ECDSA: u16 = 0x0018;
+const TPM_ALG_ECC: u16 = 0x0023;
+
 const signingKeyAttributes: u32 = 0x0 |
                 // 0x0000_0002 | // TPMA_OBJECT_fixedTPM = 0x00000002
                 // 0x0000_0010 | // TPMA_OBJECT_fixedParent = 0x00000010
@@ -24,6 +30,10 @@ const signingKeyAttributes: u32 = 0x0 |
                 0x0000_0040 | // TPMA_OBJECT_userWithAuth = 0x00000040
                 0x0000_0400 | // TPMA_OBJECT_noDA = 0x00000400
                 0x0004_0000;  // TPMA_OBJECT_sign = 0x00040000
+
+fn isECC(key: &WOLFTPM2_KEY) -> bool {
+    return key.pub_.publicArea.type_ == TPM_ALG_ECC;
+}
 
 pub fn init() -> usize {
     // TODO check if already initialized / is not None
@@ -38,14 +48,14 @@ pub fn init() -> usize {
         let ret = wolfTPM2_SelfTest(dev);
         log::info!("wolfTPM2_SelfTest: {:?}", ret);
 
-        let ret = create_null_signing_key();
+        let ret = create_null_signing_key(true);
         log::info!("create_null_signing_key: {:?}", ret);
 
         return ret as usize;
     }
 }
 
-fn create_null_signing_key() -> usize {
+fn create_null_signing_key(isECC: bool) -> usize {
     log::info!("Creating signing key under null hierarchy");
 
     unsafe {
@@ -63,8 +73,13 @@ fn create_null_signing_key() -> usize {
 
         let signingTemplate = &mut TPMT_PUBLIC::default();
 
-        let ret = wolfTPM2_GetKeyTemplate_RSA(signingTemplate, signingKeyAttributes);
-        log::info!("wolfTPM2_GetKeyTemplate_RSA: {:?}", ret);
+        if isECC {
+            let ret = wolfTPM2_GetKeyTemplate_ECC(signingTemplate, signingKeyAttributes, TPM_ECC_NIST_P256, TPM_ALG_ECDSA);
+            log::info!("wolfTPM2_GetKeyTemplate_ECC: {:?}", ret);
+        } else {
+            let ret = wolfTPM2_GetKeyTemplate_RSA(signingTemplate, signingKeyAttributes);
+            log::info!("wolfTPM2_GetKeyTemplate_RSA: {:?}", ret);
+        }
 
         let ret = wolfTPM2_CreatePrimaryKey(dev, signing_key, nullHandle, signingTemplate, ptr::null_mut(), 0);
         log::info!("new wolfTPM2_CreatePrimaryKey: {:?}", ret);
@@ -87,11 +102,17 @@ pub fn get_signing_key(public_key: &mut [u8]) -> usize {
             return usize::MAX;
         };
 
-        let n = signing_key.pub_.publicArea.unique.rsa.size as usize;
-
-        public_key.copy_from_slice(&signing_key.pub_.publicArea.unique.rsa.buffer[..n]);
-
-        return n;
+        // Determine type of key.
+        if isECC(signing_key) {
+            let (x_size, y_size) = (signing_key.pub_.publicArea.unique.ecc.x.size as usize, signing_key.pub_.publicArea.unique.ecc.y.size as usize);
+            public_key.copy_from_slice(&signing_key.pub_.publicArea.unique.ecc.x.buffer[..x_size]);
+            public_key[x_size..].copy_from_slice(&signing_key.pub_.publicArea.unique.ecc.y.buffer[..y_size]);
+            return x_size + y_size;
+        } else {
+            let n = signing_key.pub_.publicArea.unique.rsa.size as usize;
+            public_key.copy_from_slice(&signing_key.pub_.publicArea.unique.rsa.buffer[..n]);
+            return n;
+        }
     }
 }
 
@@ -103,9 +124,15 @@ pub fn print_signing_key() {
             return;
         };
 
-        log::info!("signing_key.rsa.size: {:?}", signing_key.pub_.publicArea.unique.rsa.size);
-        log::info!("signing_key.rsa.exponent: {:?}", signing_key.pub_.publicArea.parameters.rsaDetail.exponent);
-        log::info!("signing_key.rsa.buff: {:?}", signing_key.pub_.publicArea.unique.rsa.buffer);
+        if isECC(signing_key) {
+            let (x_size, y_size) = (signing_key.pub_.publicArea.unique.ecc.x.size as usize, signing_key.pub_.publicArea.unique.ecc.y.size as usize);
+            log::info!("signing_key.ecc.x: {:?}", &signing_key.pub_.publicArea.unique.ecc.x.buffer[..x_size]);
+            log::info!("signing_key.ecc.y: {:?}", &signing_key.pub_.publicArea.unique.ecc.y.buffer[..y_size]);
+        } else {
+            log::info!("signing_key.rsa.size: {:?}", signing_key.pub_.publicArea.unique.rsa.size);
+            log::info!("signing_key.rsa.exponent: {:?}", signing_key.pub_.publicArea.parameters.rsaDetail.exponent);
+            log::info!("signing_key.rsa.buff: {:?}", signing_key.pub_.publicArea.unique.rsa.buffer);
+        }
     }
 }
 
@@ -125,7 +152,13 @@ pub fn sign(digest: &[u8], sig: &mut [u8]) -> i32 {
             return i32::MAX;
         };
 
-        let ret = wolfTPM2_SignHashScheme(dev, signing_key, digest.as_ptr(), *digestSz, sig.as_mut_ptr(), sigSz as *mut i32, 0x0014, 0x000B);
+        let ret: i32;
+        if isECC(signing_key) {
+            ret = wolfTPM2_SignHashScheme(dev, signing_key, digest.as_ptr(), *digestSz, sig.as_mut_ptr(), sigSz as *mut i32, TPM_ALG_ECDSA, TPM_ALG_SHA256);
+        } else {
+            ret = wolfTPM2_SignHashScheme(dev, signing_key, digest.as_ptr(), *digestSz, sig.as_mut_ptr(), sigSz as *mut i32, TPM_ALG_RSASSA, TPM_ALG_SHA256);
+        }
+
         log::info!("wolfTPM2_SignHashScheme: {:?}", ret);
 
         return *sigSz;
@@ -148,9 +181,11 @@ pub fn sign_e2e_benchmark(digest: &[u8], sig: &mut [u8]) -> u64 {
             return u64::MAX;
         };
 
+        let signAlg = if isECC(signing_key) { TPM_ALG_ECDSA } else { TPM_ALG_RSASSA };
+
         asm! ("mfence;");
         let start = unsafe { _rdtsc() };
-        let ret = wolfTPM2_SignHashScheme(dev, signing_key, digest.as_ptr(), *digestSz, sig.as_mut_ptr(), sigSz as *mut i32, 0x0014, 0x000B);
+        let ret = wolfTPM2_SignHashScheme(dev, signing_key, digest.as_ptr(), *digestSz, sig.as_mut_ptr(), sigSz as *mut i32, signAlg, TPM_ALG_SHA256);
         let end = unsafe { _rdtsc() };
         asm! ("mfence;");
         return end - start;
@@ -159,8 +194,8 @@ pub fn sign_e2e_benchmark(digest: &[u8], sig: &mut [u8]) -> u64 {
 
 pub fn hash_and_sign(data: &[u8], sig: &mut [u8]) -> i32 {
     let hash = &mut WOLFTPM2_HASH::default();
-    let digest: &mut [byte] = &mut [0; 32];
-    let digestSz: &mut u32 = &mut 32;
+    let digest = &mut [0; 32];
+    let digestSz = &mut (digest.len() as u32);
 
     unsafe {
         let Some(ref mut dev) = DEV else {
@@ -183,7 +218,7 @@ pub fn hash_and_sign(data: &[u8], sig: &mut [u8]) -> i32 {
     }
 }
 
-pub fn sign_zeroes() {
+pub fn hash_and_sign_zeroes() {
     // TODO will this actually throw an error if SIGNING_KEY is None?
     unsafe {
         let Some(ref mut dev) = DEV else {
@@ -196,17 +231,17 @@ pub fn sign_zeroes() {
             return;
         };
 
-        let digest = [0; 32];
-        let sig = &mut [0; 256];
-        let sig_size = &mut 256;
+        let data = [0; 32];
 
-        let ret = wolfTPM2_SignHashScheme(dev, signing_key, digest.as_ptr(), 32, sig.as_mut_ptr(), sig_size, 0x0014, 0x000B);
-        log::info!("wolfTPM2_SignHashScheme: {:?}", ret);
-        log::info!("sig: {:?}", sig);
-        log::info!("sig_size: {:?}", sig_size);
-
-        let ret = wolfTPM2_VerifyHashScheme(dev, signing_key, sig.as_ptr(), *sig_size, digest.as_ptr(), 32, 0x0014, 0x000B);
-        log::info!("wolfTPM2_VerifyHashScheme: {:?}", ret);
+        if isECC(signing_key) {
+            let sig = &mut [0; 64];
+            let _ = hash_and_sign(&data, sig);
+            log::info!("Sig: {:?}", sig);
+        } else {
+            let sig = &mut [0; 256];
+            let _ = hash_and_sign(&data, sig);
+            log::info!("Sig: {:?}", sig);
+        }
     }
 }
 

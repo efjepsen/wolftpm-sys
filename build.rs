@@ -43,6 +43,7 @@ fn main() -> std::io::Result<()> {
 
     let builder = bindgen::Builder::default()
         .allowlist_file(wolftpm_dst.join(PathBuf::from("include/wolftpm/tpm2_wrap.h")).to_str().unwrap())
+        .allowlist_file(wolftpm_dst.join(PathBuf::from("include/wolftpm/tpm2.h")).to_str().unwrap())
         .clang_arg(format!("-I{}/", wolftpm_dst.join("include").display()))
         .header("wrapper.h")
         .use_core()

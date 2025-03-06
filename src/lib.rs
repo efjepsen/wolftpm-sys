@@ -31,63 +31,118 @@ const signingKeyAttributes: u32 = 0x0 |
                 0x0000_0400 | // TPMA_OBJECT_noDA = 0x00000400
                 0x0004_0000;  // TPMA_OBJECT_sign = 0x00040000
 
+// Helper function to determine if a key uses ECC, or not (is RSA).
 fn isECC(key: &WOLFTPM2_KEY) -> bool {
     return key.pub_.publicArea.type_ == TPM_ALG_ECC;
 }
 
+// Initializes the TPM interface & creates a key in the null hierarhy
 pub fn init() -> usize {
-    // TODO check if already initialized / is not None
+    // Returns zero on success.
     unsafe {
         DEV = Some(WOLFTPM2_DEV::default());
 
         let Some(ref mut dev) = DEV else { return usize::MAX; };
 
         let ret = wolfTPM2_Init(dev, None, ptr::null_mut());
-        log::info!("wolfTPM2_Init: {:?}", ret);
+        log::trace!("wolfTPM2_Init: {:?}", ret);
 
         let ret = wolfTPM2_SelfTest(dev);
         log::info!("wolfTPM2_SelfTest: {:?}", ret);
 
         let ret = create_null_signing_key(true);
-        log::info!("create_null_signing_key: {:?}", ret);
+        log::trace!("create_null_signing_key: {:?}", ret);
 
         return ret as usize;
     }
 }
 
+// Create a key under the null hierarchy, which is lost on every power reset.
+// This is useful for testing so as to not clutter your TPM.
+// In a real deployment, you would want to choose a specific handle and store
+// signing keys there.
 fn create_null_signing_key(isECC: bool) -> usize {
-    log::info!("Creating signing key under null hierarchy");
+    log::trace!("Creating signing key under null hierarchy");
 
+    unsafe {
+        let Some(ref mut dev) = DEV else {
+            log::error!("TPM2 device not initialized");
+            return usize::MAX;
+        };
+
+        SIGNING_KEY = Some(WOLFTPM2_KEY::default());
+        let Some(ref mut signing_key) = SIGNING_KEY else {
+            log::error!("signing_key not created");
+            return usize::MAX;
+        };
+
+        let signingTemplate = &mut TPMT_PUBLIC::default();
+
+        // NOTE: In order to use the TPM Quote functionality, use the signing
+        // keys templates for AIKs (Attestation Identity Key) below
+
+        if isECC {
+            // let ret = wolfTPM2_GetKeyTemplate_ECC_AIK(signingTemplate);
+            let ret = wolfTPM2_GetKeyTemplate_ECC(signingTemplate, signingKeyAttributes, TPM_ECC_NIST_P256, TPM_ALG_ECDSA);
+            log::trace!("wolfTPM2_GetKeyTemplate_ECC: {:?}", ret);
+        } else {
+            // let ret = wolfTPM2_GetKeyTemplate_RSA_AIK(signingTemplate);
+            let ret = wolfTPM2_GetKeyTemplate_RSA(signingTemplate, signingKeyAttributes);
+            log::trace!("wolfTPM2_GetKeyTemplate_RSA: {:?}", ret);
+        }
+
+        let ret = wolfTPM2_CreatePrimaryKey(dev, signing_key, nullHandle, signingTemplate, ptr::null_mut(), 0);
+        log::info!("wolfTPM2_CreatePrimaryKey: {:?}", ret);
+
+        return ret as usize;
+    }
+}
+
+// Used to benchmark time to produce a quote, comparable to signing.
+pub fn quote() -> usize {
+    unsafe {
+        let Some(ref mut signing_key) = SIGNING_KEY else {
+            log::error!("signing_key not created");
+            return usize::MAX;
+        };
+        let mut in_: Quote_In = Quote_In::default();
+
+        let mut pcr = TPML_PCR_SELECTION::default();
+        let mut pcrsel: [u8; 17] = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 23];
+
+        TPM2_SetupPCRSelArray(&mut pcr, TPM_ALG_SHA256, pcrsel.as_mut_ptr() , 17);
+        in_.signHandle = signing_key.handle.hndl;
+        in_.qualifyingData = TPM2B_DATA::default(); // nonce
+        in_.inScheme = signing_key.pub_.publicArea.parameters.eccDetail.scheme;
+        in_.PCRselect = pcr;
+
+        let mut out_: Quote_Out = Quote_Out::default();
+
+        let ret = TPM2_Quote(&mut in_, &mut out_);
+        log::info!("tpm quote, in PCRS: {:?}", in_.PCRselect.pcrSelections);
+        log::info!("tpm quote, out.quoted: {:?}", out_.quoted);
+        log::info!("tpm quote, out.signature: {:?}", out_.signature.signature.ecdsa);
+
+        return ret as usize;
+    }
+}
+
+// Used to benchmark time to extend a PCR.
+pub fn extend_pcr() -> usize {
     unsafe {
         let Some(ref mut dev) = DEV else {
             log::info!("TPM2 device not initialized");
             return usize::MAX;
         };
 
-        // TODO check if initialized
-        SIGNING_KEY = Some(WOLFTPM2_KEY::default());
-        let Some(ref mut signing_key) = SIGNING_KEY else {
-            log::info!("signing_key not created");
-            return usize::MAX;
-        };
-
-        let signingTemplate = &mut TPMT_PUBLIC::default();
-
-        if isECC {
-            let ret = wolfTPM2_GetKeyTemplate_ECC(signingTemplate, signingKeyAttributes, TPM_ECC_NIST_P256, TPM_ALG_ECDSA);
-            log::info!("wolfTPM2_GetKeyTemplate_ECC: {:?}", ret);
-        } else {
-            let ret = wolfTPM2_GetKeyTemplate_RSA(signingTemplate, signingKeyAttributes);
-            log::info!("wolfTPM2_GetKeyTemplate_RSA: {:?}", ret);
-        }
-
-        let ret = wolfTPM2_CreatePrimaryKey(dev, signing_key, nullHandle, signingTemplate, ptr::null_mut(), 0);
-        log::info!("new wolfTPM2_CreatePrimaryKey: {:?}", ret);
+        let digest: [u8; 32] = [0; 32];
+        let ret = wolfTPM2_ExtendPCR(dev, 23, TPM_ALG_SHA256.into(), digest.as_ptr(), 32);
 
         return ret as usize;
     }
 }
 
+// Run the TPM self test functionality
 pub fn self_test() -> usize {
     unsafe {
         let Some(ref mut dev) = DEV else { return usize::MAX; };
@@ -95,11 +150,13 @@ pub fn self_test() -> usize {
     }
 }
 
+// Copy TPM signing key public bytes into a user-provided buffer
+// Returns size of the key in bytes.
 pub fn get_signing_key(public_key: &mut [u8]) -> usize {
     unsafe {
         let Some(ref mut signing_key) = SIGNING_KEY else {
-            log::info!("signing_key not created");
-            return usize::MAX;
+            log::error!("signing_key not created");
+            return 0;
         };
 
         // Determine type of key.
@@ -116,11 +173,68 @@ pub fn get_signing_key(public_key: &mut [u8]) -> usize {
     }
 }
 
+// Sign a SHA256 digest directly
+// Returns number of bytes copied into sig buffer, else -1 on error
+pub fn sign(digest: &[u8], sig: &mut [u8]) -> i32 {
+    let sigSz: &mut i32 = &mut (sig.len() as i32);
+    let digestSz: &mut i32 = &mut (digest.len() as i32);
+
+    unsafe {
+        let Some(ref mut dev) = DEV else {
+            log::error!("TPM2 device not initialized");
+            return -1;
+        };
+
+        let Some(ref mut signing_key) = SIGNING_KEY else {
+            log::error!("signing_key not created");
+            return -1;
+        };
+
+        let ret: i32;
+        if isECC(signing_key) {
+            ret = wolfTPM2_SignHashScheme(dev, signing_key, digest.as_ptr(), *digestSz, sig.as_mut_ptr(), sigSz as *mut i32, TPM_ALG_ECDSA, TPM_ALG_SHA256);
+        } else {
+            ret = wolfTPM2_SignHashScheme(dev, signing_key, digest.as_ptr(), *digestSz, sig.as_mut_ptr(), sigSz as *mut i32, TPM_ALG_RSASSA, TPM_ALG_SHA256);
+        }
+
+        if (ret != 0) {
+            log::error!("wolfTPM2_SignHashScheme failed with code {}", ret);
+            return -1;
+        }
+
+        return *sigSz;
+    }
+}
+
+// Sign a message, rather than providing the SHA256 digest
+// Returns number of bytes copied into the sig buffer, else -1 on error
+pub fn hash_and_sign(data: &[u8], sig: &mut [u8]) -> i32 {
+    let hash = &mut WOLFTPM2_HASH::default();
+    let digest = &mut [0; 32];
+    let digestSz = &mut (digest.len() as u32);
+
+    unsafe {
+        let Some(ref mut dev) = DEV else {
+            log::info!("TPM2 device not initialized");
+            return -1;
+        };
+
+        let ret = wolfTPM2_HashStart(dev, hash, TPM_ALG_SHA256, ptr::null_mut(), 0);
+        let ret = wolfTPM2_HashUpdate(dev, hash, data.as_ptr(), data.len().try_into().unwrap());
+        let ret = wolfTPM2_HashFinish(dev, hash, digest.as_mut_ptr(), digestSz);
+
+        return sign(digest, sig);
+    }
+}
+
+/***********************************/
+/** Extra misc. helpers and utils **/
+/***********************************/
+
 pub fn print_signing_key() {
-    // TODO will this actually throw an error if SIGNING_KEY is None?
     unsafe {
         let Some(ref mut signing_key) = SIGNING_KEY else {
-            log::info!("signing_key not created");
+            log::error!("signing_key not created");
             return;
         };
 
@@ -136,37 +250,8 @@ pub fn print_signing_key() {
     }
 }
 
-pub fn sign(digest: &[u8], sig: &mut [u8]) -> i32 {
-    // TODO assert digest is 32 bytes, sig is 256 bytes
-    let sigSz: &mut i32 = &mut (sig.len() as i32);
-    let digestSz: &mut i32 = &mut (digest.len() as i32);
-
-    unsafe {
-        let Some(ref mut dev) = DEV else {
-            log::info!("TPM2 device not initialized");
-            return i32::MAX;
-        };
-
-        let Some(ref mut signing_key) = SIGNING_KEY else {
-            log::info!("signing_key not created");
-            return i32::MAX;
-        };
-
-        let ret: i32;
-        if isECC(signing_key) {
-            ret = wolfTPM2_SignHashScheme(dev, signing_key, digest.as_ptr(), *digestSz, sig.as_mut_ptr(), sigSz as *mut i32, TPM_ALG_ECDSA, TPM_ALG_SHA256);
-        } else {
-            ret = wolfTPM2_SignHashScheme(dev, signing_key, digest.as_ptr(), *digestSz, sig.as_mut_ptr(), sigSz as *mut i32, TPM_ALG_RSASSA, TPM_ALG_SHA256);
-        }
-
-        log::info!("wolfTPM2_SignHashScheme: {:?}", ret);
-
-        return *sigSz;
-    }
-}
-
+// Was used for benchmarking TPM signing ops.
 pub fn sign_e2e_benchmark(digest: &[u8], sig: &mut [u8]) -> u64 {
-    // TODO assert digest is 32 bytes, sig is 256 bytes
     let sigSz: &mut i32 = &mut (sig.len() as i32);
     let digestSz: &mut i32 = &mut (digest.len() as i32);
 
@@ -189,143 +274,6 @@ pub fn sign_e2e_benchmark(digest: &[u8], sig: &mut [u8]) -> u64 {
         let end = unsafe { _rdtsc() };
         asm! ("mfence;");
         return end - start;
-    }
-}
-
-pub fn hash_and_sign(data: &[u8], sig: &mut [u8]) -> i32 {
-    let hash = &mut WOLFTPM2_HASH::default();
-    let digest = &mut [0; 32];
-    let digestSz = &mut (digest.len() as u32);
-
-    unsafe {
-        let Some(ref mut dev) = DEV else {
-            log::info!("TPM2 device not initialized");
-            return i32::MAX;
-        };
-
-        let ret = wolfTPM2_HashStart(dev, hash, 0x000B, ptr::null_mut(), 0);
-        log::info!("wolfTPM2_HashStart: {:?}", ret);
-
-        let ret = wolfTPM2_HashUpdate(dev, hash, data.as_ptr(), data.len().try_into().unwrap());
-        log::info!("wolfTPM2_HashUpdate: {:?}", ret);
-
-        let ret = wolfTPM2_HashFinish(dev, hash, digest.as_mut_ptr(), digestSz);
-        log::info!("wolfTPM2_HashFinish: {:?}", ret);
-
-        log::info!("Hash: {:?}", digest);
-
-        return sign(digest, sig);
-    }
-}
-
-pub fn hash_and_sign_zeroes() {
-    // TODO will this actually throw an error if SIGNING_KEY is None?
-    unsafe {
-        let Some(ref mut dev) = DEV else {
-            log::info!("TPM2 device not initialized");
-            return;
-        };
-
-        let Some(ref mut signing_key) = SIGNING_KEY else {
-            log::info!("signing_key not created");
-            return;
-        };
-
-        let data = [0; 32];
-
-        if isECC(signing_key) {
-            let sig = &mut [0; 64];
-            let _ = hash_and_sign(&data, sig);
-            log::info!("Sig: {:?}", sig);
-        } else {
-            let sig = &mut [0; 256];
-            let _ = hash_and_sign(&data, sig);
-            log::info!("Sig: {:?}", sig);
-        }
-    }
-}
-
-pub fn ecschnorr_test() -> usize {
-    // let dev: &mut WOLFTPM2_DEV = &mut WOLFTPM2_DEV::default();
-    let publicTemplate = &mut TPMT_PUBLIC::default();
-    // let objectAttributes = 0x40000; // TPMA_OBJECT_sign  = 0x40000
-    // let curve = 0x0003; // TPM_ECC_NIST_P256  = 0x0003,
-    // let sigScheme = 0x001C; // TPM_ALG_ECSCHNORR = 0x001C,
-    // let sigScheme = 0x0018; // TPM_ALG_ECDSA = 0x0018,
-    let sigScheme = 0x0001; // TPM_ALG_RSA = 0x0001,
-
-    let storage_key = &mut WOLFTPM2_KEY::default();
-    let storage_handle = 0x8100_0200;
-    // let primary_key = &mut WOLFTPM2_KEY::default();
-    let signing_key = &mut WOLFTPM2_KEY::default();
-
-    let signingTemplate = &mut TPMT_PUBLIC::default();
-
-    let digest = [0; 32];
-
-    let sig = &mut [0; 512];
-    let sig_size = &mut 512;
-
-    unsafe {
-        let Some(ref mut dev) = DEV else { return usize::MAX; };
-
-        // let _ret = wolfTPM2_Init(dev, None, ptr::null_mut());
-        // log::info!("wolfTPM2_Init: {:?}", _ret);
-        // let _ret = wolfTPM2_GetKeyTemplate_ECC(publicTemplate, objectAttributes, curve, sigScheme);
-        // let _ret = wolfTPM2_GetKeyTemplate_RSA_SRK(publicTemplate);
-        // log::info!("wolfTPM2_GetKeyTemplate_RSA_SRK: {:?}", _ret);
-
-        let _ret = wolfTPM2_CreateSRK(dev, storage_key, sigScheme, ptr::null_mut(), 0);
-        log::info!("wolfTPM2_CreateSRK: {:?}", _ret);
-
-        let _ret = wolfTPM2_NVStoreKey(dev, ownerHandle, storage_key, storage_handle);
-        log::info!("wolfTPM2_NVStoreKey: {:?}", _ret);
-
-        // let _ret = wolfTPM2_CreatePrimaryKey(dev, primary_key, primaryHandle, publicTemplate, ptr::null_mut(), 0);
-        // log::info!("wolfTPM2_CreatePrimaryKey: {:?}", _ret);
-
-        let _ret = wolfTPM2_GetKeyTemplate_RSA(signingTemplate, signingKeyAttributes);
-        log::info!("wolfTPM2_GetKeyTemplate_RSA: {:?}", _ret);
-
-        // let parent = wolfTPM2_GetHandleRefFromKey(primary_key);
-        // log::info!("wolfTPM2_GetHandleRefFromKey: {:?}", _ret);
-
-        let handle = wolfTPM2_GetHandleRefFromKey(storage_key);
-
-        let _ret = wolfTPM2_CreateAndLoadKey(dev, signing_key, handle, signingTemplate, ptr::null_mut(), 0);
-        log::info!("wolfTPM2_CreateAndLoadKey: {:?}", _ret);
-
-        let _ret = wolfTPM2_SignHashScheme(dev, signing_key, digest.as_ptr(), 32, sig.as_mut_ptr(), sig_size, 0x0014, 0x000B); 
-        log::info!("wolfTPM2_SignHash: {:?}", _ret);
-
-        log::info!("sig: {:?}", sig);
-        log::info!("sig_size: {:?}", sig_size);
-
-        log::info!("keysize: {:?}", signing_key.pub_.size);
-        log::info!("signing_key.rsa.size: {:?}", signing_key.pub_.publicArea.unique.rsa.size);
-        log::info!("signing_key.rsa.exponent: {:?}", signing_key.pub_.publicArea.parameters.rsaDetail.exponent);
-        log::info!("signing_key.rsa.buff: {:?}", signing_key.pub_.publicArea.unique.rsa.buffer);
-        // log::info!("signing_key.x.size: {:?}", signing_key.pub_.publicArea.unique.ecc.x.size);
-        // log::info!("signing_key.x.buff: {:?}", signing_key.pub_.publicArea.unique.ecc.x.buffer);
-        // log::info!("signing_key.y.size: {:?}", signing_key.pub_.publicArea.unique.ecc.y.size);
-        // log::info!("signing_key.y.buff: {:?}", signing_key.pub_.publicArea.unique.ecc.y.buffer);
-
-        let new_key = &mut WOLFTPM2_KEY::default();
-        let _ret = wolfTPM2_GetKeyTemplate_RSA(publicTemplate, signingKeyAttributes);
-        log::info!("new wolfTPM2_GetKeyTemplate_RSA: {:?}", _ret);
-        let _ret = wolfTPM2_CreatePrimaryKey(dev, new_key, ownerHandle, publicTemplate, ptr::null_mut(), 0);
-        log::info!("new wolfTPM2_CreatePrimaryKey: {:?}", _ret);
-        let _ret = wolfTPM2_SignHashScheme(dev, new_key, digest.as_ptr(), 32, sig.as_mut_ptr(), sig_size, 0x0014, 0x000B);
-        log::info!("new wolfTPM2_SignHashScheme: {:?}", _ret);
-        log::info!("new sig: {:?}", sig);
-        log::info!("new sig_size: {:?}", sig_size);
-
-        log::info!("new keysize: {:?}", new_key.pub_.size);
-        log::info!("new signing_key.rsa.size: {:?}", new_key.pub_.publicArea.unique.rsa.size);
-        log::info!("new signing_key.rsa.exponent: {:?}", new_key.pub_.publicArea.parameters.rsaDetail.exponent);
-        log::info!("new signing_key.rsa.buff: {:?}", new_key.pub_.publicArea.unique.rsa.buffer);
-
-        return 0;
     }
 }
 
@@ -375,16 +323,5 @@ pub fn mftr_info(buff: &mut [u8]) -> usize {
         }
 
         written + count
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn it_works() {
-        let result = add(2, 2);
-        assert_eq!(result, 4);
     }
 }

@@ -162,7 +162,7 @@ pub fn get_signing_key(public_key: &mut [u8]) -> usize {
         // Determine type of key.
         if isECC(signing_key) {
             let (x_size, y_size) = (signing_key.pub_.publicArea.unique.ecc.x.size as usize, signing_key.pub_.publicArea.unique.ecc.y.size as usize);
-            public_key.copy_from_slice(&signing_key.pub_.publicArea.unique.ecc.x.buffer[..x_size]);
+            public_key[..x_size].copy_from_slice(&signing_key.pub_.publicArea.unique.ecc.x.buffer[..x_size]);
             public_key[x_size..].copy_from_slice(&signing_key.pub_.publicArea.unique.ecc.y.buffer[..y_size]);
             return x_size + y_size;
         } else {
